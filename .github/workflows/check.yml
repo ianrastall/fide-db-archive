@@ -1,0 +1,30 @@
+name: Check archive
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest -v
+      - name: Check binary hashes, sizes, and inventory
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import archive
+          root = Path('data')
+          inventory = json.loads((root / 'inventory.json').read_text())
+          files = inventory['files']
+          assert not inventory['missing_completed_years']
+          assert {p.name for p in root.glob('*.bin')} == {r['file'] for r in files}
+          for record in files:
+              path = root / record['file']
+              assert path.stat().st_size == record['bytes'] < archive.LIMIT
+              assert archive.digest(path) == record['sha256']
+              assert archive.read_manifest(path)['lists'] == record['lists']
+          print(f'Checked {len(files)} binaries')
+          PY
