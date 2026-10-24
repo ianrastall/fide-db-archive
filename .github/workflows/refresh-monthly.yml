@@ -1,0 +1,36 @@
+name: Prepare monthly FIDE ratings
+on:
+  workflow_dispatch:
+    inputs:
+      period:
+        description: 'Optional YYYY-MM override (normally calculated in UTC)'
+        required: false
+        type: string
+  schedule:
+    - cron: '17 12,18,21,23 28-31 * *'
+    - cron: '17 0,3 1,2 * *'
+permissions:
+  contents: write
+concurrency:
+  group: fide-monthly
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test monthly conversion
+        run: python -m unittest test_refresh_monthly
+      - name: Prepare and publish verified data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PERIOD: ${{ inputs.period }}
+        shell: bash
+        run: |
+          args=()
+          if [ -n "$PERIOD" ]; then args+=(--period "$PERIOD"); fi
+          python refresh_monthly.py --publish "${args[@]}"
