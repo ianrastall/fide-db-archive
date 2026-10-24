@@ -47,6 +47,16 @@ def gh(*args):
     return subprocess.check_output(['gh', *map(str, args)], text=True, encoding='utf-8')
 
 
+def find_release(tag):
+    # REST /releases/tags does not resolve a draft whose tag is not yet created.
+    result = subprocess.run(['gh', 'release', 'view', tag, '--repo', REPO, '--json', 'databaseId,isDraft'],
+                            text=True, encoding='utf-8', capture_output=True)
+    if result.returncode:
+        return None
+    value = json.loads(result.stdout)
+    return {'id': value['databaseId'], 'draft': value['isDraft']}
+
+
 def players(path):
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
@@ -174,11 +184,12 @@ def prepare(period, output, source=None):
 
 def publish(receipt, output):
     tag = receipt['release']
-    try:
-        release = json.loads(gh('api', f'repos/{REPO}/releases/tags/{tag}'))
-    except subprocess.CalledProcessError:
+    release = find_release(tag)
+    if release is None:
         gh('release', 'create', tag, '--repo', REPO, '--draft', '--target', receipt['sourceRevision'], '--title', f'FIDE {receipt["period"]} monthly data', '--notes', 'Standard SQLite list, 2500+ table, original FIDE downloads and verification receipt.')
-        release = json.loads(gh('api', f'repos/{REPO}/releases/tags/{tag}'))
+        release = find_release(tag)
+        if release is None:
+            raise ValueError('Created draft release could not be found')
     if not release['draft']:
         raise ValueError('Published monthly releases are immutable; inspect the existing receipt instead')
     assets = [*receipt['assets'], {'name': 'monthly.json', 'bytes': (output / 'monthly.json').stat().st_size, 'sha256': sha(output / 'monthly.json')}]
@@ -205,10 +216,7 @@ def main():
         return
     # Repeated scheduled runs must not download/rewrite an already published month.
     if args.publish:
-        try:
-            existing = json.loads(gh('api', f'repos/{REPO}/releases/tags/standard-sqlite-{period}-monthly'))
-        except subprocess.CalledProcessError:
-            existing = None
+        existing = find_release(f'standard-sqlite-{period}-monthly')
         if existing and not existing['draft']:
             print(f'{period} is already published; no changes.')
             return

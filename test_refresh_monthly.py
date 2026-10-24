@@ -6,11 +6,16 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch, Mock
 
-from refresh_monthly import prepare, target_period, COLUMNS
+from refresh_monthly import prepare, target_period, COLUMNS, find_release
 
 
 class MonthlyTests(unittest.TestCase):
+    def test_draft_without_a_published_tag_is_resolved_by_gh(self):
+        with patch('refresh_monthly.subprocess.run', return_value=Mock(returncode=0, stdout='{"databaseId":123,"isDraft":true}')):
+            self.assertEqual(find_release('standard-sqlite-2026-10-monthly'), {'id': 123, 'draft': True})
+
     def test_calendar(self):
         for date, expected in [('2026-10-30', None), ('2026-10-31', '2026-11'), ('2026-12-31', '2027-01'),
                                ('2028-02-28', None), ('2028-02-29', '2028-03'), ('2026-11-01', '2026-11')]:
