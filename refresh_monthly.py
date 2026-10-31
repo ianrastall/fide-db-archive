@@ -8,7 +8,7 @@ Python standard library and the authenticated gh CLI are sufficient.
 import argparse
 import calendar
 from contextlib import closing
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -28,14 +28,6 @@ INTS = set('line_no rank fide_id rating change games k birth_year'.split())
 TITLES = 'GM IM WGM FM WIM CM WFM NM WCM WNM'.split()
 
 
-def target_period(now):
-    if now.day == calendar.monthrange(now.year, now.month)[1]:
-        return (now.replace(day=1) + timedelta(days=32)).strftime('%Y-%m')
-    if now.day <= 7:
-        return now.strftime('%Y-%m')
-    return None
-
-
 def sha(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -43,10 +35,6 @@ def sha(path):
 
 def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
-
-
-def due(period, now):
-    return period + '-01T00:00:00Z' <= now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def gh(*args):
@@ -207,8 +195,8 @@ def publish(receipt, output):
     gh('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
 
 
-def refresh(period, output, source, publishing, now):
-    # Repeated scheduled runs must not download/rewrite an already published month.
+def refresh(period, output, source, publishing):
+    # Repeated runs must not download/rewrite an already published month.
     if publishing:
         existing = find_release(f'standard-sqlite-{period}-monthly')
         if existing and not existing['draft']:
@@ -219,44 +207,20 @@ def refresh(period, output, source, publishing, now):
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
-        # FIDE may post the dated lists after the last-day runs, so a missing
-        # file only means stale data once the period is due.
-        if not due(period, now):
-            print(f'FIDE has not posted {period} yet ({error.url}); nothing prepared.')
-            return
         raise ValueError(f'FIDE has not posted {period}: {error.url}') from error
     if publishing:
         publish(receipt, output)
     print(f'Verified {period}: {receipt["counts"]}')
 
 
-def require_published(period, now):
-    # Runners that cannot reach FIDE skip preparation, so check the outcome here.
-    if not due(period, now):
-        return
-    tag = f'standard-sqlite-{period}-monthly'
-    release = find_release(tag)
-    if release is None or release['draft']:
-        raise ValueError(f'{tag} is due but not published')
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--period')
+    parser.add_argument('--period', required=True)
     parser.add_argument('--source', type=Path, help='Use existing original downloads for a reproducible offline run')
     parser.add_argument('--output', type=Path, default=Path('monthly-output'))
     parser.add_argument('--publish', action='store_true')
-    parser.add_argument('--require-published', action='store_true', help='Only check that a due period has a published release')
     args = parser.parse_args()
-    now = datetime.now(timezone.utc)
-    period = args.period or target_period(now)
-    if not period:
-        print('No monthly preparation or recovery scheduled today.')
-        return
-    if args.require_published:
-        require_published(period, now)
-        return
-    refresh(period, args.output, args.source, args.publish, now)
+    refresh(args.period, args.output, args.source, args.publish)
 
 
 if __name__ == '__main__':
