@@ -10,14 +10,12 @@ import calendar
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
 import hashlib
-import http.client
 import json
 from pathlib import Path
 import re
 import shutil
 import sqlite3
 import subprocess
-import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -25,8 +23,6 @@ import zipfile
 
 REPO = 'ianrastall/fide-db-archive'
 BASE = 'https://ratings.fide.com/download/'
-ATTEMPTS = 4
-RETRY_SECONDS = 60
 COLUMNS = 'list_date line_no rank rank_note fide_id name fed sex title w_title o_title foa_title title_raw rating change games k birth_year birth_date birth_raw flag section'.split()
 INTS = set('line_no rank fide_id rating change games k birth_year'.split())
 TITLES = 'GM IM WGM FM WIM CM WFM NM WCM WNM'.split()
@@ -49,19 +45,8 @@ def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
 
 
-def fetch(url, dest):
-    # Connections to FIDE time out intermittently from hosted runners.
-    for attempt in range(1, ATTEMPTS + 1):
-        try:
-            request = urllib.request.Request(url, headers={'User-Agent': 'ChessNerd-FIDE-archive/1.0'})
-            with urllib.request.urlopen(request, timeout=180) as response, dest.open('wb') as stream:
-                shutil.copyfileobj(response, stream)
-            return
-        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
-            if attempt == ATTEMPTS or (isinstance(error, urllib.error.HTTPError) and error.code < 500):
-                raise
-            print(f'{url}: {error}; retrying in {RETRY_SECONDS}s', flush=True)
-            time.sleep(RETRY_SECONDS)
+def due(period, now):
+    return period + '-01T00:00:00Z' <= now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def gh(*args):
@@ -113,7 +98,9 @@ def prepare(period, output, source=None):
             if (source / name).resolve() != dest.resolve():
                 shutil.copyfile(source / name, dest)
         else:
-            fetch(BASE + name, dest)
+            request = urllib.request.Request(BASE + name, headers={'User-Agent': 'ChessNerd-FIDE-archive/1.0'})
+            with urllib.request.urlopen(request, timeout=180) as response, dest.open('wb') as stream:
+                shutil.copyfileobj(response, stream)
         with zipfile.ZipFile(dest) as archive:
             if archive.testzip() is not None:
                 raise ValueError(f'Corrupt ZIP: {name}')
@@ -234,7 +221,7 @@ def refresh(period, output, source, publishing, now):
             raise
         # FIDE may post the dated lists after the last-day runs, so a missing
         # file only means stale data once the period is due.
-        if period + '-01T00:00:00Z' > now.strftime('%Y-%m-%dT%H:%M:%SZ'):
+        if not due(period, now):
             print(f'FIDE has not posted {period} yet ({error.url}); nothing prepared.')
             return
         raise ValueError(f'FIDE has not posted {period}: {error.url}') from error
@@ -243,17 +230,31 @@ def refresh(period, output, source, publishing, now):
     print(f'Verified {period}: {receipt["counts"]}')
 
 
+def require_published(period, now):
+    # Runners that cannot reach FIDE skip preparation, so check the outcome here.
+    if not due(period, now):
+        return
+    tag = f'standard-sqlite-{period}-monthly'
+    release = find_release(tag)
+    if release is None or release['draft']:
+        raise ValueError(f'{tag} is due but not published')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--period')
     parser.add_argument('--source', type=Path, help='Use existing original downloads for a reproducible offline run')
     parser.add_argument('--output', type=Path, default=Path('monthly-output'))
     parser.add_argument('--publish', action='store_true')
+    parser.add_argument('--require-published', action='store_true', help='Only check that a due period has a published release')
     args = parser.parse_args()
     now = datetime.now(timezone.utc)
     period = args.period or target_period(now)
     if not period:
         print('No monthly preparation or recovery scheduled today.')
+        return
+    if args.require_published:
+        require_published(period, now)
         return
     refresh(period, args.output, args.source, args.publish, now)
 
