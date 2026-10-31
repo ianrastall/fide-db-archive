@@ -1,0 +1,23 @@
+name: Probe FIDE access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Try FIDE three times
+        shell: bash
+        run: |
+          echo "PROBE ip=$(curl -sS --max-time 15 https://api.ipify.org)"
+          for attempt in 1 2 3; do
+            result=$(curl -sS -I --connect-timeout 20 --max-time 30 -o /dev/null -w '%{http_code} connect=%{time_connect}s' https://ratings.fide.com/download/players_list_xml.zip 2>&1) || true
+            echo "PROBE attempt=$attempt $result"
+            sleep 10
+          done
