@@ -10,17 +10,23 @@ import calendar
 from contextlib import closing
 from datetime import datetime, timezone, timedelta
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
+import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 
 REPO = 'ianrastall/fide-db-archive'
 BASE = 'https://ratings.fide.com/download/'
+ATTEMPTS = 4
+RETRY_SECONDS = 60
 COLUMNS = 'list_date line_no rank rank_note fide_id name fed sex title w_title o_title foa_title title_raw rating change games k birth_year birth_date birth_raw flag section'.split()
 INTS = set('line_no rank fide_id rating change games k birth_year'.split())
 TITLES = 'GM IM WGM FM WIM CM WFM NM WCM WNM'.split()
@@ -29,7 +35,7 @@ TITLES = 'GM IM WGM FM WIM CM WFM NM WCM WNM'.split()
 def target_period(now):
     if now.day == calendar.monthrange(now.year, now.month)[1]:
         return (now.replace(day=1) + timedelta(days=32)).strftime('%Y-%m')
-    if now.day <= 2:
+    if now.day <= 7:
         return now.strftime('%Y-%m')
     return None
 
@@ -41,6 +47,21 @@ def sha(path):
 
 def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
+
+
+def fetch(url, dest):
+    # Connections to FIDE time out intermittently from hosted runners.
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            request = urllib.request.Request(url, headers={'User-Agent': 'ChessNerd-FIDE-archive/1.0'})
+            with urllib.request.urlopen(request, timeout=180) as response, dest.open('wb') as stream:
+                shutil.copyfileobj(response, stream)
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+            if attempt == ATTEMPTS or (isinstance(error, urllib.error.HTTPError) and error.code < 500):
+                raise
+            print(f'{url}: {error}; retrying in {RETRY_SECONDS}s', flush=True)
+            time.sleep(RETRY_SECONDS)
 
 
 def gh(*args):
@@ -89,14 +110,10 @@ def prepare(period, output, source=None):
         dest = output / name
         if source:
             # Preserve source files, including when source/output are the same.
-            import shutil
             if (source / name).resolve() != dest.resolve():
                 shutil.copyfile(source / name, dest)
         else:
-            request = urllib.request.Request(BASE + name, headers={'User-Agent': 'ChessNerd-FIDE-archive/1.0'})
-            with urllib.request.urlopen(request, timeout=180) as response, dest.open('wb') as stream:
-                import shutil
-                shutil.copyfileobj(response, stream)
+            fetch(BASE + name, dest)
         with zipfile.ZipFile(dest) as archive:
             if archive.testzip() is not None:
                 raise ValueError(f'Corrupt ZIP: {name}')
@@ -203,6 +220,29 @@ def publish(receipt, output):
     gh('release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
 
 
+def refresh(period, output, source, publishing, now):
+    # Repeated scheduled runs must not download/rewrite an already published month.
+    if publishing:
+        existing = find_release(f'standard-sqlite-{period}-monthly')
+        if existing and not existing['draft']:
+            print(f'{period} is already published; no changes.')
+            return
+    try:
+        receipt = prepare(period, output, source)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        # FIDE may post the dated lists after the last-day runs, so a missing
+        # file only means stale data once the period is due.
+        if period + '-01T00:00:00Z' > now.strftime('%Y-%m-%dT%H:%M:%SZ'):
+            print(f'FIDE has not posted {period} yet ({error.url}); nothing prepared.')
+            return
+        raise ValueError(f'FIDE has not posted {period}: {error.url}') from error
+    if publishing:
+        publish(receipt, output)
+    print(f'Verified {period}: {receipt["counts"]}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--period')
@@ -210,20 +250,12 @@ def main():
     parser.add_argument('--output', type=Path, default=Path('monthly-output'))
     parser.add_argument('--publish', action='store_true')
     args = parser.parse_args()
-    period = args.period or target_period(datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    period = args.period or target_period(now)
     if not period:
         print('No monthly preparation or recovery scheduled today.')
         return
-    # Repeated scheduled runs must not download/rewrite an already published month.
-    if args.publish:
-        existing = find_release(f'standard-sqlite-{period}-monthly')
-        if existing and not existing['draft']:
-            print(f'{period} is already published; no changes.')
-            return
-    receipt = prepare(period, args.output, args.source)
-    if args.publish:
-        publish(receipt, args.output)
-    print(f'Verified {period}: {receipt["counts"]}')
+    refresh(period, args.output, args.source, args.publish, now)
 
 
 if __name__ == '__main__':
